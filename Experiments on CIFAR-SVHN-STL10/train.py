@@ -6,6 +6,7 @@ import errno
 import math
 import numpy as np
 
+import wandb
 import torch
 import torch.nn.functional as F
 import torch.nn.parallel
@@ -77,6 +78,11 @@ parser.add_argument('--aux_net_feature_dim', default=0, type=int,
                     help='number of hidden features in auxiliary classifier / contrastive head '
                          '(default: 128)')
 
+parser.add_argument('--no-log', dest='no_log', action='store_true',
+                    help='do not log if this is set true')
+parser.set_defaults(no_log=False)
+
+
 # The hyper-parameters \lambda_1 and \lambda_2 for 1st and (K-1)th local modules.
 # Note that we assume they change linearly between these two modules.
 # (The last module always uses standard end-to-end loss)
@@ -129,6 +135,13 @@ check_point = os.path.join(record_path, args.checkpoint)
 
 
 def main():
+
+    wandb.login(key="")
+    wandb.init(project='infoPro_Dec', entity='ghotifish', name=record_path)
+    config = wandb.config
+    config.args = args
+
+
     global best_prec1
     best_prec1 = 0
     global val_acc
@@ -244,19 +257,30 @@ def main():
     else:
         start_epoch = 0
 
+    if not args.no_log:
+        wandb.watch(model)
+
     for epoch in range(start_epoch, training_configurations[args.model]['epochs']):
 
         adjust_learning_rate(optimizer, epoch + 1)
 
         # train for one epoch
-        train(train_loader, model, optimizer, epoch)
+        train_loss, train_prec1 = train(train_loader, model, optimizer, epoch)
+
+        if not args.no_log:
+            wandb.log({"Train Loss": train_loss}, step=epoch)
+            wandb.log({"Prec@1": train_prec1}, step=epoch)
 
         # evaluate on validation set
-        prec1 = validate(val_loader, model, epoch)
+        val_loss, val_prec1 = validate(val_loader, model, epoch)
+
+        if not args.no_log:
+            wandb.log({"Val Loss": val_loss}, step=epoch)
+            wandb.log({"Val Prec@1": val_prec1}, step=epoch)
 
         # remember best prec@1 and save checkpoint
-        is_best = prec1 > best_prec1
-        best_prec1 = max(prec1, best_prec1)
+        is_best = val_prec1 > best_prec1
+        best_prec1 = max(val_prec1, best_prec1)
 
         save_checkpoint({
             'epoch': epoch + 1,
@@ -268,6 +292,10 @@ def main():
         }, is_best, checkpoint=check_point)
         print('Best accuracy: ', best_prec1)
         np.savetxt(accuracy_file, np.array(val_acc))
+
+    if not args.no_log:
+        wandb.finish()
+
 
 
 def train(train_loader, model, optimizer, epoch):
@@ -318,6 +346,8 @@ def train(train_loader, model, optimizer, epoch):
             fd.write(string + '\n')
             fd.close()
 
+    return losses.ave, top1.ave
+
 
 def validate(val_loader, model, epoch):
     """Perform validation on the validation set"""
@@ -362,7 +392,7 @@ def validate(val_loader, model, epoch):
     fd.close()
     val_acc.append(top1.ave)
 
-    return top1.ave
+    return losses.ave, top1.ave
 
 
 def mkdir_p(path):
